@@ -1,8 +1,12 @@
 """
-운영자 텔레그램 채널 실시간 리스너 (Phase 1).
+운영자 텔레그램 채널 실시간 리스너 (Phase 1) — 다중 채널 지원.
 
-데드킹 하이엔드 검색기 채널(개인 채널, username 없음)에 올라오는
-신호 메시지를 실시간으로 받아 파싱 → output/operator_signals.jsonl 에 누적 저장.
+두 채널을 동시에 모니터링한다:
+  - 검색기 채널 (TELEGRAM_OPERATOR_CHANNEL_NAME)
+      → 신호 메시지를 파싱 → output/operator_signals.jsonl 누적 저장
+  - 강의 채널   (TELEGRAM_LECTURE_CHANNEL_NAME)
+      → parse_leading_channel.classify() 로 ACTION/BRIEFING 등 분류
+        → output/operator_trades.jsonl 누적 저장
 
 자격증명은 절대 코드에 박지 않고 .env 에서만 읽는다.
 세션 파일(*.session)은 Telethon 이 생성하며 로그인 토큰이 들어있으므로
@@ -10,7 +14,8 @@
 
 사용법:
     pip install -r requirements.txt
-    # .env 에 TELEGRAM_API_ID / TELEGRAM_API_HASH 채운 뒤
+    # .env 에 TELEGRAM_API_ID / TELEGRAM_API_HASH /
+    #        TELEGRAM_OPERATOR_CHANNEL_NAME / TELEGRAM_LECTURE_CHANNEL_NAME 채운 뒤
     python -X utf8 telegram_listener.py
 
 첫 실행:
@@ -46,12 +51,17 @@ except ImportError:
     print("telethon 이 설치돼 있지 않다. `pip install -r requirements.txt`", file=sys.stderr)
     raise
 
+# 강의 채널 메시지 분류는 parse_leading_channel 의 로직을 그대로 재사용한다.
+# (HTML 익스포트 변환과 실시간 리스닝이 같은 ACTION/BRIEFING 패턴을 쓰도록 단일 소스)
+from parse_leading_channel import classify as classify_lecture
+
 
 HERE = Path(__file__).resolve().parent
 ENV_PATH = HERE / ".env"
 SESSION_PATH = HERE / "operator_listener"   # → operator_listener.session
 OUTPUT_DIR = HERE / "output"
-OUTPUT_JSONL = OUTPUT_DIR / "operator_signals.jsonl"
+OUTPUT_SIGNALS = OUTPUT_DIR / "operator_signals.jsonl"   # 검색기 채널
+OUTPUT_TRADES = OUTPUT_DIR / "operator_trades.jsonl"     # 강의 채널
 
 
 # ============================================================
@@ -66,10 +76,14 @@ def load_env() -> dict:
     cfg = {
         "api_id": os.getenv("TELEGRAM_API_ID", "").strip(),
         "api_hash": os.getenv("TELEGRAM_API_HASH", "").strip(),
-        "channel_name": os.getenv("TELEGRAM_OPERATOR_CHANNEL_NAME", "").strip(),
-        "channel_id": os.getenv("TELEGRAM_OPERATOR_CHANNEL_ID", "").strip(),
+        # 검색기 채널
+        "operator_channel_name": os.getenv("TELEGRAM_OPERATOR_CHANNEL_NAME", "").strip(),
+        "operator_channel_id": os.getenv("TELEGRAM_OPERATOR_CHANNEL_ID", "").strip(),
+        # 강의 채널 (신규)
+        "lecture_channel_name": os.getenv("TELEGRAM_LECTURE_CHANNEL_NAME", "").strip(),
+        "lecture_channel_id": os.getenv("TELEGRAM_LECTURE_CHANNEL_ID", "").strip(),
     }
-    missing = [k for k in ("api_id", "api_hash", "channel_name") if not cfg[k]]
+    missing = [k for k in ("api_id", "api_hash", "operator_channel_name") if not cfg[k]]
     if missing:
         print(f".env 에 다음 값이 비어있다: {', '.join(missing)}", file=sys.stderr)
         sys.exit(2)
@@ -78,12 +92,23 @@ def load_env() -> dict:
     except ValueError:
         print(f"TELEGRAM_API_ID 가 정수가 아니다: {cfg['api_id']!r}", file=sys.stderr)
         sys.exit(2)
-    cfg["channel_id_int"] = int(cfg["channel_id"]) if cfg["channel_id"] else None
+    cfg["operator_channel_id_int"] = (
+        int(cfg["operator_channel_id"]) if cfg["operator_channel_id"] else None
+    )
+    cfg["lecture_channel_id_int"] = (
+        int(cfg["lecture_channel_id"]) if cfg["lecture_channel_id"] else None
+    )
+    if not cfg["lecture_channel_name"]:
+        print(
+            "ℹ️ TELEGRAM_LECTURE_CHANNEL_NAME 이 비어있다 — 강의 채널은 건너뛰고 "
+            "검색기 채널만 모니터링한다.",
+            file=sys.stderr,
+        )
     return cfg
 
 
 # ============================================================
-# 메시지 파서
+# 검색기 채널 메시지 파서
 # ============================================================
 # 등급 — 길이가 긴 패턴부터 먼저 매칭 (regex alternation 은 left-to-right)
 GRADE_PATTERNS: list[tuple[str, re.Pattern]] = [
@@ -199,16 +224,18 @@ def parse_message(text: str) -> dict:
 # ============================================================
 # 저장
 # ============================================================
-def append_jsonl(sig: ParsedSignal) -> None:
+def append_jsonl(path: Path, record: dict) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_JSONL, "a", encoding="utf-8") as f:
-        f.write(json.dumps(asdict(sig), ensure_ascii=False) + "\n")
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 # ============================================================
 # 채널 탐색 (private 채널, username 없음 → 이름으로 매칭)
 # ============================================================
-async def find_channel_by_name(client: TelegramClient, target_name: str) -> Optional[int]:
+async def find_channel_by_name(
+    client: TelegramClient, target_name: str, env_key: str
+) -> Optional[int]:
     print(f"📡 dialog 들 순회 중... 대상 이름: {target_name!r}")
     exact: list[tuple[str, int]] = []
     fuzzy: list[tuple[str, int]] = []
@@ -245,20 +272,60 @@ async def find_channel_by_name(client: TelegramClient, target_name: str) -> Opti
             print(f"   - {t} (ID={cid})")
         return None
 
-    print("❌ 매칭 채널 없음.")
+    print(f"❌ 매칭 채널 없음: {target_name!r}")
     print("─" * 60)
     print("구독 중인 채널/그룹 이름 목록:")
     for t in sorted(set(all_titles)):
         print(f"   • {t}")
     print("─" * 60)
-    print("→ .env 의 TELEGRAM_OPERATOR_CHANNEL_NAME 을 위 목록에서 정확히 복사해 수정.")
+    print(f"→ .env 의 {env_key} 를 위 목록에서 정확히 복사해 수정.")
     return None
 
 
-def save_channel_id_to_env(channel_id: int) -> None:
+def save_channel_id_to_env(env_key: str, channel_id: int) -> None:
     """발견된 채널 ID 를 .env 에 영구 저장."""
-    set_key(str(ENV_PATH), "TELEGRAM_OPERATOR_CHANNEL_ID", str(channel_id), quote_mode="never")
-    print(f"💾 .env 에 TELEGRAM_OPERATOR_CHANNEL_ID={channel_id} 저장 완료.")
+    set_key(str(ENV_PATH), env_key, str(channel_id), quote_mode="never")
+    print(f"💾 .env 에 {env_key}={channel_id} 저장 완료.")
+
+
+async def resolve_channel(
+    client: TelegramClient,
+    *,
+    label: str,
+    name: str,
+    channel_id: Optional[int],
+    name_env_key: str,
+    id_env_key: str,
+    required: bool,
+) -> Optional[int]:
+    """채널 ID 를 확정한다. 미설정이면 이름으로 탐색 후 .env 저장.
+
+    못 찾으면 required 일 때 종료, 아니면 None 반환(해당 채널 스킵)."""
+    if not name:
+        return None
+    if channel_id is None:
+        channel_id = await find_channel_by_name(client, name, name_env_key)
+        if channel_id is None:
+            if required:
+                await client.disconnect()
+                sys.exit(3)
+            print(f"⏭️ [{label}] 채널을 못 찾아 건너뛴다.")
+            return None
+        save_channel_id_to_env(id_env_key, channel_id)
+
+    # entity 확보 (peer 캐싱)
+    try:
+        target = await client.get_entity(channel_id)
+        title = getattr(target, "title", str(channel_id))
+        print(f"🎯 [{label}] 리스닝 대상: {title!r} (ID={channel_id})")
+        return channel_id
+    except Exception as e:
+        print(f"⚠️ [{label}] 채널 entity 조회 실패: {e}")
+        print(f"   ID={channel_id} 가 정확한지, 이 계정이 채널에 가입돼 있는지 확인.")
+        if required:
+            await client.disconnect()
+            sys.exit(4)
+        return None
 
 
 # ============================================================
@@ -270,31 +337,38 @@ async def run(cfg: dict) -> None:
     me = await client.get_me()
     print(f"🔐 로그인 완료: {me.first_name or ''} (@{me.username or '-'}, id={me.id})")
 
-    channel_id = cfg["channel_id_int"]
-    if channel_id is None:
-        channel_id = await find_channel_by_name(client, cfg["channel_name"])
-        if channel_id is None:
-            await client.disconnect()
-            sys.exit(3)
-        save_channel_id_to_env(channel_id)
+    operator_id = await resolve_channel(
+        client,
+        label="검색기",
+        name=cfg["operator_channel_name"],
+        channel_id=cfg["operator_channel_id_int"],
+        name_env_key="TELEGRAM_OPERATOR_CHANNEL_NAME",
+        id_env_key="TELEGRAM_OPERATOR_CHANNEL_ID",
+        required=True,
+    )
+    lecture_id = await resolve_channel(
+        client,
+        label="강의",
+        name=cfg["lecture_channel_name"],
+        channel_id=cfg["lecture_channel_id_int"],
+        name_env_key="TELEGRAM_LECTURE_CHANNEL_NAME",
+        id_env_key="TELEGRAM_LECTURE_CHANNEL_ID",
+        required=False,
+    )
 
-    # 채널 entity 확보 (peer 캐싱)
-    try:
-        target = await client.get_entity(channel_id)
-        title = getattr(target, "title", str(channel_id))
-        print(f"🎯 리스닝 대상: {title!r} (ID={channel_id})")
-    except Exception as e:
-        print(f"⚠️ 채널 entity 조회 실패: {e}")
-        print(f"   ID={channel_id} 가 정확한지, 또는 이 계정이 해당 채널에 가입돼 있는지 확인.")
-        await client.disconnect()
-        sys.exit(4)
-
-    print(f"💾 저장 경로: {OUTPUT_JSONL}")
+    print()
+    print("📋 리스닝 대상:")
+    print(f"   [검색기] ID={operator_id} → {OUTPUT_SIGNALS}")
+    if lecture_id is not None:
+        print(f"   [강의]   ID={lecture_id} → {OUTPUT_TRADES}")
+    else:
+        print("   [강의]   (미설정 — 건너뜀)")
     print("📨 메시지 대기 중 (Ctrl+C 로 종료)...")
     print()
 
-    @client.on(events.NewMessage(chats=channel_id))
-    async def handler(event):
+    # ----- 검색기 채널 핸들러 -----
+    @client.on(events.NewMessage(chats=operator_id))
+    async def operator_handler(event):
         text = event.message.message or ""
         parsed = parse_message(text)
         sig = ParsedSignal(
@@ -306,15 +380,50 @@ async def run(cfg: dict) -> None:
             tags=parsed["tags"],
             raw_text=text,
             message_id=event.message.id,
-            channel_id=channel_id,
+            channel_id=operator_id,
         )
-        append_jsonl(sig)
+        append_jsonl(OUTPUT_SIGNALS, asdict(sig))
         preview = text.replace("\n", " ⏎ ")[:80]
         print(
-            f"[{sig.timestamp[11:19]}] "
+            f"[검색기][{sig.timestamp[11:19]}] "
             f"{sig.grade or '?':<24} {sig.symbol or '?':<12} "
             f"BB={sig.bb_pct}% 5MA={sig.ma5_pct}% tags={sig.tags} | {preview}"
         )
+
+    # ----- 강의 채널 핸들러 -----
+    if lecture_id is not None:
+
+        @client.on(events.NewMessage(chats=lecture_id))
+        async def lecture_handler(event):
+            text = event.message.message or ""
+            cls = classify_lecture(text)
+            if cls is None:
+                kind, fields = "UNCLASSIFIED", {}
+            else:
+                kind, fields = cls
+            ts = datetime.now(timezone.utc).isoformat()
+            record = {
+                "timestamp": ts,
+                "kind": kind,
+                **fields,
+                "raw": text,
+                "message_id": event.message.id,
+                "channel_id": lecture_id,
+            }
+            append_jsonl(OUTPUT_TRADES, record)
+            detail = ""
+            if "symbol" in fields:
+                detail = (
+                    f"{fields.get('symbol', '?'):<6} "
+                    f"{fields.get('direction', '?')} "
+                    f"{fields.get('weight_pct', '?')}%"
+                )
+            elif "subject" in fields:
+                detail = f"subject={fields['subject']}"
+            preview = text.replace("\n", " ⏎ ")[:80]
+            print(
+                f"[강의][{ts[11:19]}] {kind:<16} {detail:<18} | {preview}"
+            )
 
     await client.run_until_disconnected()
 

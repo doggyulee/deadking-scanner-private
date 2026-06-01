@@ -137,19 +137,35 @@ deadking_scanner/
 ├── filters.py             # 7가지 PASS 필터
 ├── classifier.py          # 6등급 시그널 분류
 ├── telegram_notifier.py   # 텔레그램 알림 (봇 API, 송신)
-├── telegram_listener.py   # Phase 1 — 운영자 채널 실시간 수신 (Telethon)
+├── telegram_listener.py   # Phase 1 — 검색기+강의 2채널 실시간 수신 (Telethon)
+├── parse_leading_channel.py # 강의 채널 HTML 익스포트 → trades.jsonl (classify 공유)
 ├── match_analyzer.py      # 운영자 신호 vs 우리 스캐너 매칭률 분석
 ├── scanner.py             # 메인 스캔 파이프라인
 ├── __main__.py            # CLI 진입점
 ├── self_test.py           # 오프라인 자체 검증
-└── output/                # 스캔 결과 JSON / operator_signals.jsonl
+└── output/                # 스캔 결과 JSON / operator_signals.jsonl / operator_trades.jsonl
 ```
 
-## 📡 Phase 1 — 운영자 채널 리스너 (`telegram_listener.py`)
+## 📡 Phase 1 — 운영자 채널 리스너 (`telegram_listener.py`, 2채널 동시 가동)
 
-운영자 개인 채널 (username 없음) "데드킹 하이엔드 검색기" 의 신호를 실시간 수신해
-`output/operator_signals.jsonl` 에 누적 기록한다.
-이 데이터로 우리 스캐너 분류 결과와 일치율을 추적 → 임계값 튜닝의 정답지.
+운영자 개인 채널(username 없음) **두 개를 동시에** 실시간 수신한다:
+
+| 채널 | `.env` 이름 변수 | 저장 파일 | 파싱 |
+|------|------------------|-----------|------|
+| **검색기** | `TELEGRAM_OPERATOR_CHANNEL_NAME` | `output/operator_signals.jsonl` | 등급/심볼/BB·5MA 이격/태그 (`parse_message`) |
+| **강의** | `TELEGRAM_LECTURE_CHANNEL_NAME` | `output/operator_trades.jsonl` | ACTION/BRIEFING 등 (`parse_leading_channel.classify`) |
+
+- **`operator_signals.jsonl` (검색기)** — 운영자 검색기가 발사하는 *신호*. `{timestamp, grade,
+  symbol, bb_pct, ma5_pct, tags, raw_text, message_id, channel_id}`. 우리 스캐너 분류 결과와
+  일치율을 추적 → 임계값 튜닝의 정답지.
+- **`operator_trades.jsonl` (강의)** — 운영자가 강의 채널에 직접 쏘는 *실매매 액션·브리핑*.
+  `{timestamp, kind, ...필드, raw, message_id, channel_id}`. `kind` 는
+  `ACTION`(`## 비중 X%`) / `ACTION_OUT`(전량) / `BRIEFING`(종목명·관찰구간·3분할) /
+  `MONITORING_SHARE` / `ANNOUNCE` / `UNCLASSIFIED`. 매칭 안 되는 메시지도 `UNCLASSIFIED` 로
+  raw 보존. 파싱 로직은 `parse_leading_channel.py` 와 단일 소스를 공유한다.
+
+콘솔 출력에는 `[검색기]` / `[강의]` 접두사로 어느 채널 메시지인지 표시한다.
+강의 채널 변수(`TELEGRAM_LECTURE_CHANNEL_NAME`)를 비워두면 검색기 채널만 모니터링한다.
 
 ### 1. API 자격증명 발급
 
@@ -165,9 +181,11 @@ TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TELEGRAM_OPERATOR_CHANNEL_NAME=데드킹 하이엔드 검색기
 TELEGRAM_OPERATOR_CHANNEL_ID=
+TELEGRAM_LECTURE_CHANNEL_NAME=[데드킹] 코인 하이엔드 강의
+TELEGRAM_LECTURE_CHANNEL_ID=
 ```
 
-`TELEGRAM_OPERATOR_CHANNEL_ID` 는 비워둔다 — 첫 실행 시 자동 탐색해 채워줌.
+`*_CHANNEL_ID` 두 개는 비워둔다 — 첫 실행 시 이름으로 자동 탐색해 채워줌.
 
 > ⚠️ **보안 주의**
 > - `.env` 와 `*.session` 은 `.gitignore` 로 이미 제외돼 있다. 절대 커밋 금지.
@@ -183,10 +201,11 @@ python -X utf8 telegram_listener.py
 
 첫 실행:
 1. 텔레그램 인증 코드 입력 (앱으로 받음, 2FA 비번 있으면 그것도)
-2. 가입된 채널들 순회하며 이름 매칭 → 발견 시 ID 를 `.env` 에 자동 저장
-3. 못 찾으면 가입 채널 목록 출력 → `.env` 의 `TELEGRAM_OPERATOR_CHANNEL_NAME` 수정 후 재실행
+2. 가입된 채널들 순회하며 검색기·강의 두 이름 모두 매칭 → 발견 시 각 ID 를 `.env` 에 자동 저장
+3. 못 찾으면 가입 채널 목록 출력 → `.env` 의 해당 `*_CHANNEL_NAME` 수정 후 재실행
 
-이후 실행은 저장된 ID 로 바로 리스닝.
+이후 실행은 저장된 ID 로 바로 두 채널 리스닝.
+시작 시 "📋 리스닝 대상" 에 검색기·강의 두 채널이 모두 표시되면 정상 가동.
 
 ### 4. 매칭 분석
 
