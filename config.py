@@ -99,15 +99,25 @@ EXCLUDE_KEYWORDS = ["BTCDOM", "DEFI", "USDC"]  # 인덱스/스테이블 제외
 # 운영자가 'Deadking zone' 또는 'Deadking zone OS' 로 발사한 종목.
 # 이 등급은 단타 단발성으로, 같은 종목 반복 진입은 손실 누적이 검증된 패턴.
 # 새 종목이 Deadking zone 으로 떨어질 때마다 사용자가 수동 추가한다.
-DEADKING_BLACKLIST = ["RAVE"]
+# LAB 5/31 Deadking zone 15회+ 발사로 회피 종목 재분류 (RAVE 패턴과 동일)
+DEADKING_BLACKLIST = ["RAVE", "LAB"]
 
 # 운영자(강의 채널) 실제 매매 검증 종목 (parse_leading_channel.py 산물)
 # 검색기에 신호 떴을 뿐만 아니라 운영자가 실제로 비중 X% 시장가 정리까지 한 자리.
 # 진입 후보의 신뢰도 가산점.
 # 주의: 같은 종목이 DEADKING_BLACKLIST 에도 있으면 블랙리스트가 우선 (자동 NONE).
+# 갱신 이력 (각 종목 운영자 진입 일자 + 보유 시간):
+#   STO/NOM/JOE/KOMA/SPK/SAGA/UB/BEAT — 기존 검증 종목 (강의 채널 ACTION)
+#   NEAR   5/26 운영자 본인 분석 진입 → 5/29 09:58 완결, 보유 61h (본인 분석 첫 완결)
+#   ALLO   5/29 07:56 1차 + 2차 진입, 진행 중 (길어질 수 있는 포지션)
+#   XLM    5/29 진입 → 당일 전량 (단타 완결, "반등 가능성" 선제 익절)
+#   PORTAL 5/31 07:45 진입 → 09:51 전량, 보유 2h6m (사상 최단 트레이드);
+#          6/1 새벽 재펌프 MAD OS
+#   LAB 제거 → DEADKING_BLACKLIST 로 이동 (Deadking zone 반복 발사)
+#   RAVE 제거 → 이미 DEADKING_BLACKLIST
 OPERATOR_TRADED_SYMBOLS = [
-    "STO", "NOM", "JOE", "KOMA", "RAVE",
-    "SPK", "LAB", "SAGA", "UB", "BEAT",
+    "STO", "NOM", "JOE", "KOMA", "SPK", "SAGA", "UB", "BEAT",
+    "NEAR", "ALLO", "XLM", "PORTAL",
 ]
 
 # ============================================================

@@ -559,11 +559,28 @@ def print_summary(results: list[tuple[Signal, flt.FilterReport | None]]) -> None
                     print(f"      ✗ {r.name}: {r.detail}")
 
 
+def _num(v) -> float | None:
+    """JSON 저장용 숫자 정리. NaN/inf → None (유효 JSON + 다운스트림 0.0 오인 방지)."""
+    if v is None or pd.isna(v):
+        return None
+    return float(v)
+
+
 def save_json(results: list[tuple[Signal, flt.FilterReport | None]]) -> str:
     """JSON 파일로 저장."""
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     path = os.path.join(config.OUTPUT_DIR, f"scan_{ts}.json")
+
+    # JSON 저장 직전 BB/5MA 값 추적 (필드명 mismatch 디버깅용)
+    if log.isEnabledFor(logging.DEBUG):
+        for sig, _ in results:
+            if sig.grade == "NONE":
+                continue
+            log.debug(
+                f"[save_json] {sig.symbol} grade={sig.grade} "
+                f"bb_dev_1d={sig.context.bb_dev_1d!r} ma5_deviation={sig.context.ma5_deviation!r}"
+            )
 
     payload = {
         "scanned_at": datetime.now(timezone.utc).isoformat(),
@@ -579,6 +596,12 @@ def save_json(results: list[tuple[Signal, flt.FilterReport | None]]) -> str:
         "signals": [
             {
                 **sig.to_dict(),
+                # 평탄(top-level) 편의 필드 — 다운스트림 분석이 context 중첩 없이
+                # bb_dev / ma5_dev 로 바로 읽도록. 과거엔 context.bb_dev_1d 로만
+                # 저장돼 최상위 bb_dev 를 읽으면 키 부재로 0.0 으로 오인됐다.
+                "bb_dev": _num(sig.context.bb_dev_1d),
+                "ma5_dev": _num(sig.context.ma5_deviation),
+                "bb_dev_pctl": _num(sig.context.bb_dev_pctl_1d),
                 "filter_report": (
                     {
                         "all_passed": rep.all_passed,

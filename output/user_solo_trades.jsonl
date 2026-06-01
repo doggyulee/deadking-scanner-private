@@ -1,0 +1,2 @@
+{"timestamp": "2026-05-26T23:46:00+07:00", "kind": "ENTRY", "symbol": "PHA", "trigger": "scanner_signal", "trigger_detail": "Good Short Zone BB+17% 5MA+35% (GAP)", "price": null, "weight_pct": null, "result_pct": null, "hold_minutes": null, "note": "검색기 신호만으로 운영자 리딩 없이 자체 진입 — 룰북 §10 실천 첫 사례"}
+{"timestamp": null, "kind": "EXIT", "symbol": "PHA", "trigger": "manual", "trigger_detail": "익절", "price": null, "weight_pct": null, "result_pct": null, "hold_minutes": null, "note": "익절 완료 — 시각·수익률 사용자 추후 보고 예정"}
